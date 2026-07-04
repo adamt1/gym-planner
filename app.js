@@ -165,10 +165,17 @@ function computeVolume(days) {
 const STORE_PLAN = "gymPlan_v1";
 const STORE_PROGRESS = "gymProgress_v1";
 
-function savePlan(plan) { localStorage.setItem(STORE_PLAN, JSON.stringify(plan)); }
+/* מקומי (מטמון / מצב אופליין) + סנכרון ענן (Supabase) כשמחובר */
+function savePlan(plan) {
+  localStorage.setItem(STORE_PLAN, JSON.stringify(plan));
+  if (typeof sbReady === "function" && sbReady() && state.user) sbSavePlan(plan, state.progress);
+}
 function loadPlan() { try { return JSON.parse(localStorage.getItem(STORE_PLAN)); } catch { return null; } }
 function loadProgress() { try { return JSON.parse(localStorage.getItem(STORE_PROGRESS)) || {}; } catch { return {}; } }
-function saveProgress(p) { localStorage.setItem(STORE_PROGRESS, JSON.stringify(p)); }
+function saveProgress(p) {
+  localStorage.setItem(STORE_PROGRESS, JSON.stringify(p));
+  if (typeof sbReady === "function" && sbReady() && state.user) sbSaveProgress(p);
+}
 function progKey(dayIdx, exId) { return `${dayIdx}::${exId}`; }
 
 /* ----------------------------- מצב ----------------------------- */
@@ -178,6 +185,7 @@ const DEFAULT_ONB = {
   age: "", weight: "",
 };
 let state = {
+  user: null,
   onb: { ...DEFAULT_ONB },
   step: 0,
   plan: null,
@@ -219,6 +227,7 @@ const ICONS = {
   spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>',
   chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>',
   fire: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.072-2.143-.224-4.054 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.153.433-2.294 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>',
+  logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="m16 17 5-5-5-5"/><path d="M21 12H9"/></svg>',
 };
 
 /* ============================ אונבורדינג / שאלון ============================ */
@@ -576,10 +585,16 @@ function renderPlan() {
             `${plan.goalLabel} · ${plan.config.days} ימים · רמה ${LEVEL_LABELS[plan.config.level]}` }),
         ]),
         el("div", { class: "plan-actions" }, [
+          (typeof sbReady === "function" && sbReady() && state.user)
+            ? el("button", { class: "btn-ghost", onclick: renderHistory, title: "היסטוריה והתקדמות" },
+                [el("span", { html: ICONS.chart }), el("span", { class: "btn-label", text: "היסטוריה" })]) : null,
           el("button", { class: "btn-ghost", onclick: () => window.print(), title: "הדפסה / שמירה כ-PDF" },
             [el("span", { html: ICONS.print }), el("span", { class: "btn-label", text: "הדפסה" })]),
           el("button", { class: "btn-ghost", onclick: onNewPlan, title: "בניית תוכנית חדשה" },
             [el("span", { html: ICONS.refresh }), el("span", { class: "btn-label", text: "תוכנית חדשה" })]),
+          (typeof sbReady === "function" && sbReady() && state.user)
+            ? el("button", { class: "btn-ghost", onclick: async () => { await sbSignOut(); }, title: "התנתקות" },
+                [el("span", { html: ICONS.logout }), el("span", { class: "btn-label", text: "התנתקות" })]) : null,
         ]),
       ]),
       tabs,
@@ -611,6 +626,10 @@ function renderDay(day) {
   const totalSets = day.exercises.reduce((s, e) => s + e.sets, 0);
   const rows = day.exercises.map((ex) => renderExerciseRow(day.index, ex));
 
+  const canLog = typeof sbReady === "function" && sbReady() && state.user;
+  const saveBtn = canLog ? el("button", { class: "btn-primary save-workout", onclick: (e) => saveWorkout(day, e.currentTarget) },
+    [el("span", { html: ICONS.check }), el("span", { text: "שמור אימון להיסטוריה" })]) : null;
+
   return el("section", { class: "day-panel" }, [
     el("div", { class: "day-panel-head" }, [
       el("h2", { text: `יום ${day.index + 1} — ${day.name}` }),
@@ -624,7 +643,41 @@ function renderDay(day) {
       el("span", { class: "col-rest", text: "מנוחה" }),
     ]),
     el("div", { class: "ex-list" }, rows),
+    saveBtn ? el("div", { class: "day-save" }, [saveBtn, el("p", { class: "day-save-hint", text: "מסמנים סטים וממלאים משקל/חזרות, ואז שומרים את האימון להיסטוריה ולגרפים." })]) : null,
   ]);
+}
+
+/* שמירת כל הסטים שסומנו כבוצעו ביום הנוכחי → היסטוריה (set_logs) */
+async function saveWorkout(day, btn) {
+  const entries = [];
+  day.exercises.forEach((ex) => {
+    const p = state.progress[progKey(day.index, ex.id)];
+    if (!p || !p.sets) return;
+    p.sets.forEach((sd, s) => {
+      if (sd && sd.done) {
+        entries.push({
+          exercise_id: ex.id, exercise_name: ex.name, muscle: ex.muscle,
+          day_index: day.index, set_index: s + 1,
+          weight: sd.weight !== "" && sd.weight != null ? Number(sd.weight) : null,
+          reps: sd.reps !== "" && sd.reps != null ? Number(sd.reps) : null,
+          rpe: sd.rpe !== "" && sd.rpe != null ? Number(sd.rpe) : null,
+          note: p.note || null,
+        });
+      }
+    });
+  });
+  if (!entries.length) { toast("לא סומנו סטים כבוצעו"); return; }
+  btn.disabled = true;
+  const { error } = await sbLogSets(entries);
+  btn.disabled = false;
+  toast(error ? ("שגיאה בשמירה: " + error.message) : `נשמרו ${entries.length} סטים להיסטוריה`);
+}
+
+function toast(msg) {
+  let t = $("#toast");
+  if (!t) { t = el("div", { id: "toast", class: "toast" }); document.body.appendChild(t); }
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 3200);
 }
 
 /* הדגמת תרגיל: GIF אמיתי אם קיים מיפוי, אחרת אנימציית SVG. */
@@ -663,7 +716,7 @@ function startMediaLoad(wrap, ex) {
 
 function renderExerciseRow(dayIdx, ex) {
   const key = progKey(dayIdx, ex.id);
-  const prog = state.progress[key] || { sets: [], weight: "" };
+  const prog = state.progress[key] || { sets: [], note: "" };
 
   const detail = el("div", { class: "ex-detail", hidden: "hidden" });
 
@@ -690,43 +743,41 @@ function renderExerciseRow(dayIdx, ex) {
     detail.appendChild(el("p", { class: "ex-secondary", text: "שרירים משניים: " + ex.secondary.map((m) => MUSCLE_LABELS[m]).join(", ") }));
   }
 
-  /* מעקב סטים */
+  /* מעקב מלא: משקל × חזרות @ מאמץ לכל סט + הערה */
   const tracker = el("div", { class: "tracker" });
-  const setDots = el("div", { class: "set-dots" });
+  const getProg = () => { const p = state.progress[key] || { sets: [], note: prog.note || "" }; p.sets = p.sets || []; return p; };
+  const setField = (s, field, val) => {
+    const p = getProg();
+    const cur = (typeof p.sets[s] === "object" && p.sets[s]) ? p.sets[s] : {};
+    cur[field] = val; p.sets[s] = cur;
+    state.progress[key] = p; saveProgress(state.progress);
+  };
+  tracker.appendChild(el("div", { class: "set-head" }, [
+    el("span", { text: "סט" }), el("span", { text: "משקל" }), el("span", { text: "חזרות" }),
+    el("span", { text: "מאמץ" }), el("span", { text: "בוצע" }),
+  ]));
   for (let s = 0; s < ex.sets; s++) {
-    const done = !!(prog.sets && prog.sets[s]);
-    const dot = el("button", {
-      class: "set-dot" + (done ? " done" : ""),
-      title: `סט ${s + 1}`,
+    const sd = (typeof prog.sets[s] === "object" && prog.sets[s]) ? prog.sets[s] : (prog.sets[s] ? { done: true } : {});
+    const wIn = el("input", { class: "log-input", type: "number", inputmode: "decimal", min: "0", placeholder: "ק״ג", value: sd.weight != null ? sd.weight : "", oninput: (e) => setField(s, "weight", e.target.value) });
+    const rIn = el("input", { class: "log-input", type: "number", inputmode: "numeric", min: "0", placeholder: "חז׳", value: sd.reps != null ? sd.reps : "", oninput: (e) => setField(s, "reps", e.target.value) });
+    const rpeIn = el("input", { class: "log-input", type: "number", inputmode: "numeric", min: "1", max: "10", placeholder: "1-10", value: sd.rpe != null ? sd.rpe : "", oninput: (e) => setField(s, "rpe", e.target.value) });
+    const dot = el("button", { class: "set-dot" + (sd.done ? " done" : ""), title: `סט ${s + 1}`,
       onclick: () => {
-        const p = state.progress[key] || { sets: [], weight: prog.weight || "" };
-        p.sets = p.sets || [];
-        p.sets[s] = !p.sets[s];
-        state.progress[key] = p;
-        saveProgress(state.progress);
-        dot.classList.toggle("done", !!p.sets[s]);
-        if (p.sets[s]) startRestTimer(ex.restSec); // סימון סט מפעיל טיימר מנוחה
+        const p = getProg();
+        const cur = (typeof p.sets[s] === "object" && p.sets[s]) ? p.sets[s] : {};
+        cur.done = !cur.done; p.sets[s] = cur;
+        state.progress[key] = p; saveProgress(state.progress);
+        dot.classList.toggle("done", !!cur.done);
+        if (cur.done) startRestTimer(ex.restSec);
       },
-    }, [ el("span", { class: "set-dot-num", text: String(s + 1) }), el("span", { class: "set-dot-check", html: ICONS.check }) ]);
-    setDots.appendChild(dot);
+    }, [el("span", { class: "set-dot-check", html: ICONS.check })]);
+    tracker.appendChild(el("div", { class: "set-row" }, [el("span", { class: "sr-num", text: String(s + 1) }), wIn, rIn, rpeIn, dot]));
   }
-
-  const weightInput = el("input", {
-    class: "weight-input", type: "number", inputmode: "decimal", min: "0",
-    placeholder: "משקל (ק״ג)", value: prog.weight || "",
-    oninput: (e) => {
-      const p = state.progress[key] || { sets: [] };
-      p.weight = e.target.value;
-      state.progress[key] = p;
-      saveProgress(state.progress);
-    },
-  });
-
+  const noteIn = el("input", { class: "weight-input note-input", type: "text", placeholder: "הערה (רשות)", value: prog.note || "",
+    oninput: (e) => { const p = getProg(); p.note = e.target.value; state.progress[key] = p; saveProgress(state.progress); } });
   const timerBtn = el("button", { class: "mini-timer-btn", onclick: () => startRestTimer(ex.restSec) },
-    [ el("span", { html: ICONS.timer }), el("span", { text: `מנוחה ${ex.restSec}ש׳` }) ]);
-
-  tracker.appendChild(el("div", { class: "tracker-row" }, [ el("span", { class: "tracker-label", text: "סימון סטים:" }), setDots ]));
-  tracker.appendChild(el("div", { class: "tracker-row" }, [ weightInput, timerBtn ]));
+    [el("span", { html: ICONS.timer }), el("span", { text: `מנוחה ${ex.restSec}ש׳` })]);
+  tracker.appendChild(el("div", { class: "tracker-row" }, [noteIn, timerBtn]));
   detail.appendChild(tracker);
 
   return row;
@@ -861,17 +912,148 @@ function stopRestTimer() {
   if (panel) panel.classList.add("hidden");
 }
 
+/* ============================ היסטוריה והתקדמות ============================ */
+function roundN(n) { return Math.round(Number(n) || 0); }
+function lineChart(pts) {
+  const W = 320, H = 160, pad = 28, n = pts.length;
+  const ys = pts.map((p) => p.y);
+  const ymin = Math.min(...ys, 0), ymax = Math.max(...ys, 1);
+  const xAt = (i) => n === 1 ? W / 2 : pad + (i / (n - 1)) * (W - 2 * pad);
+  const yAt = (v) => H - pad - ((v - ymin) / (ymax - ymin || 1)) * (H - 2 * pad);
+  let d = ""; pts.forEach((p, i) => { d += (i ? " L" : "M") + xAt(i).toFixed(1) + " " + yAt(p.y).toFixed(1); });
+  const dots = pts.map((p, i) => `<circle cx="${xAt(i).toFixed(1)}" cy="${yAt(p.y).toFixed(1)}" r="3.5" fill="var(--primary)"/>`).join("");
+  const wrap = el("div", { class: "chart-wrap" });
+  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+    <line x1="${pad}" y1="${H - pad}" x2="${W - pad}" y2="${H - pad}" stroke="var(--border)"/>
+    <path d="${d}" fill="none" stroke="var(--primary)" stroke-width="2.5" stroke-linejoin="round"/>
+    ${dots}
+    <text x="${W - pad}" y="14" text-anchor="end" fill="var(--primary)" font-size="12">מקס ${roundN(ymax)}</text>
+    <text x="${pad}" y="${H - 8}" fill="var(--muted-fg)" font-size="10">${(pts[0].x || "").slice(5)}</text>
+    <text x="${W - pad}" y="${H - 8}" text-anchor="end" fill="var(--muted-fg)" font-size="10">${(pts[n - 1].x || "").slice(5)}</text>
+  </svg>`;
+  return wrap;
+}
+async function histLoadExercise(exId, exName, chartBox, listBox) {
+  chartBox.innerHTML = '<p class="level-note">טוען…</p>'; listBox.innerHTML = "";
+  const logs = await sbHistory(exId);
+  const byDay = {};
+  logs.forEach((r) => {
+    const d = (r.performed_at || "").slice(0, 10);
+    const w = Number(r.weight) || 0, reps = Number(r.reps) || 0;
+    const e1rm = w > 0 ? w * (1 + reps / 30) : 0;
+    if (!byDay[d] || e1rm > byDay[d].e1rm) byDay[d] = { date: d, weight: w, reps, e1rm };
+  });
+  const points = Object.values(byDay).sort((a, b) => a.date < b.date ? -1 : 1);
+  chartBox.innerHTML = "";
+  if (!points.length) { chartBox.appendChild(el("p", { class: "level-note", text: "אין נתונים לתרגיל זה." })); return; }
+  chartBox.appendChild(el("div", { class: "hist-chart-title", text: `${exName} — משקל מיטבי לאורך זמן (ק״ג)` }));
+  chartBox.appendChild(lineChart(points.map((p) => ({ x: p.date, y: p.weight }))));
+  const recent = Object.values(byDay).sort((a, b) => a.date < b.date ? 1 : -1).slice(0, 8);
+  listBox.appendChild(el("h3", { text: "אימונים אחרונים" }));
+  recent.forEach((d) => listBox.appendChild(el("div", { class: "hist-row" }, [
+    el("span", { class: "hist-date", text: d.date }),
+    el("span", { class: "hist-best", text: `${roundN(d.weight)} ק״ג × ${d.reps}` }),
+  ])));
+}
+async function renderHistory() {
+  const root = $("#app"); root.innerHTML = "";
+  const back = el("button", { class: "btn-ghost", onclick: renderPlan }, [el("span", { html: ICONS.arrowRight }), el("span", { class: "btn-label", text: "לתוכנית" })]);
+  const body = el("div", { class: "hist-body" }, [el("p", { class: "level-note", text: "טוען נתונים…" })]);
+  root.appendChild(el("div", { class: "history" }, [
+    el("header", { class: "plan-header" }, [el("div", {}, [el("h1", { text: "היסטוריה והתקדמות" })]), el("div", { class: "plan-actions" }, [back])]),
+    body,
+  ]));
+  const exs = await sbLoggedExercises();
+  body.innerHTML = "";
+  if (!exs.length) {
+    body.appendChild(el("p", { class: "level-note", text: 'עדיין אין נתונים. באימון — סמן סטים כבוצעו, מלא משקל/חזרות, ולחץ "שמור אימון להיסטוריה".' }));
+    return;
+  }
+  const select = el("select", { class: "weight-input hist-select" }, exs.map((e) => el("option", { value: e.id, text: e.name })));
+  const chartBox = el("div", { class: "hist-chart" });
+  const listBox = el("div", { class: "hist-list" });
+  select.addEventListener("change", () => histLoadExercise(select.value, exs.find((x) => x.id === select.value).name, chartBox, listBox));
+  body.appendChild(el("div", { class: "hist-controls" }, [el("label", { class: "tracker-label", text: "תרגיל:" }), select]));
+  body.appendChild(chartBox); body.appendChild(listBox);
+  histLoadExercise(exs[0].id, exs[0].name, chartBox, listBox);
+}
+
+/* ============================ מסך התחברות ============================ */
+function renderLogin() {
+  const root = $("#app"); root.innerHTML = "";
+  const msg = el("p", { class: "auth-msg" });
+  const email = el("input", { class: "weight-input auth-input", type: "email", placeholder: "אימייל", inputmode: "email" });
+  const pass = el("input", { class: "weight-input auth-input", type: "password", placeholder: "סיסמה (6+ תווים)" });
+  let mode = "signin"; // signin | signup
+
+  const submit = el("button", { class: "btn-primary", onclick: async () => {
+    msg.textContent = ""; msg.className = "auth-msg";
+    const e = email.value.trim(), p = pass.value;
+    if (!e || p.length < 6) { msg.textContent = "הזן אימייל וסיסמה (6+ תווים)."; msg.classList.add("err"); return; }
+    submit.disabled = true;
+    const res = mode === "signup" ? await sbSignUpEmail(e, p) : await sbSignInEmail(e, p);
+    submit.disabled = false;
+    if (res.error) { msg.textContent = res.error.message; msg.classList.add("err"); return; }
+    if (mode === "signup" && !res.data.session) { msg.textContent = "נשלח מייל אימות — אשר/י אותו ואז התחבר/י."; msg.classList.add("ok"); }
+    // התחברות מוצלחת תטופל ע"י sbOnAuthChange
+  } });
+  const setLabel = () => { submit.querySelector("span").textContent = mode === "signup" ? "הרשמה" : "התחברות"; toggle.textContent = mode === "signup" ? "כבר יש לי חשבון — התחברות" : "אין לי חשבון — הרשמה"; };
+  submit.appendChild(el("span", { text: "התחברות" }));
+  const toggle = el("button", { class: "auth-toggle", onclick: () => { mode = mode === "signup" ? "signin" : "signup"; setLabel(); msg.textContent = ""; } });
+
+  const googleBtn = el("button", { class: "btn-ghost auth-google", onclick: async () => {
+    const res = await sbSignInGoogle();
+    if (res && res.error) { msg.textContent = res.error.message + " (ייתכן ש-Google עדיין לא הופעל)"; msg.classList.add("err"); }
+  } }, [el("span", { text: "התחברות עם Google" })]);
+
+  root.appendChild(el("div", { class: "onb-intro auth" }, [
+    el("div", { class: "logo", html: ICONS.dumbbell }),
+    el("h1", { text: "בונה תוכניות אימון" }),
+    el("p", { class: "onb-sub", text: "התחבר/י כדי לשמור את התוכנית, לעקוב אחרי האימונים ולראות התקדמות בכל מכשיר." }),
+    googleBtn,
+    el("div", { class: "auth-divider", text: "או עם אימייל" }),
+    email, pass, submit, toggle, msg,
+  ]));
+  setLabel();
+}
+
 /* ============================ אתחול ============================ */
-function init() {
+function bootWithPlan() {
+  if (state.plan && state.plan.days) { renderPlan(); return true; }
+  return false;
+}
+function localBoot() {
   const saved = loadPlan();
   if (saved && saved.days) {
     state.plan = saved;
     if (saved.onb) state.onb = { ...DEFAULT_ONB, ...saved.onb };
     state.progress = loadProgress();
     renderPlan();
+  } else { state.step = 0; renderOnboarding(); }
+}
+async function afterLogin() {
+  const remote = await sbLoadPlan();
+  if (remote && remote.data && remote.data.days) {
+    state.plan = remote.data;
+    state.progress = remote.progress || {};
+    if (state.plan.onb) state.onb = { ...DEFAULT_ONB, ...state.plan.onb };
+    renderPlan();
   } else {
-    state.step = 0;
-    renderOnboarding();
+    localBoot(); // אין תוכנית בענן → מטמון מקומי או שאלון (תישמר לענן בעת יצירה)
+  }
+}
+async function init() {
+  if (typeof sbReady === "function" && sbReady()) {
+    state.user = await sbGetUser();
+    sbOnAuthChange(async (session) => {
+      const prev = state.user ? state.user.id : null;
+      state.user = session ? session.user : null;
+      if (state.user && state.user.id !== prev) await afterLogin();
+      else if (!state.user) renderLogin();
+    });
+    if (state.user) await afterLogin(); else renderLogin();
+  } else {
+    localBoot(); // Supabase לא נטען (אופליין/חסום) → מצב מקומי בלבד
   }
 }
 
