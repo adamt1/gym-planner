@@ -33,7 +33,7 @@ async function sbSignInEmail(email, password) {
 }
 async function sbSignUpEmail(email, password) {
   const c = sbClient(); if (!c) return { error: { message: "Supabase not loaded" } };
-  return c.auth.signUp({ email, password });
+  return c.auth.signUp({ email, password, options: { emailRedirectTo: location.origin + location.pathname } });
 }
 async function sbSignOut() { const c = sbClient(); if (c) await c.auth.signOut(); }
 function sbOnAuthChange(cb) { const c = sbClient(); if (c) c.auth.onAuthStateChange((_e, session) => cb(session)); }
