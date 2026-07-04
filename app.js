@@ -695,32 +695,25 @@ function buildDemo(ex) {
   if (gifId && typeof mediaGifUrl === "function") {
     wrap.classList.add("ex-media-wrap", "loading");
     wrap._ex = ex;
-    const img = el("img", { class: "ex-media", alt: `הדגמת ${ex.name}`, "data-src": mediaGifUrl(gifId) });
+    // טעינה מיידית — התמונה מתנגנת לבד עם רינדור התרגיל (בלי lazy, שמתנגש עם ה-timeout)
+    const img = el("img", { class: "ex-media", alt: `הדגמת ${ex.name}`, src: mediaGifUrl(gifId) });
     img.addEventListener("load", () => { if (wrap._t) { clearTimeout(wrap._t); wrap._t = null; } wrap.classList.remove("loading"); });
-    img.addEventListener("error", () => svgFallback(wrap, ex)); // קובץ מקומי חסר → אנימציית SVG
+    img.addEventListener("error", () => svgFallback(wrap, ex)); // קובץ חסר/כשל → אנימציית SVG
+    wrap._t = setTimeout(() => { if (!img.complete || !img.naturalWidth) svgFallback(wrap, ex); }, MEDIA_TIMEOUT_MS);
     wrap.appendChild(img);
   } else {
     wrap.innerHTML = (typeof exerciseAnimation === "function") ? exerciseAnimation(ex) : "";
   }
   return wrap;
 }
-/* טעינה עצלה + timeout: נקרא בעת פתיחת פאנל התרגיל */
-function startMediaLoad(wrap, ex) {
-  const img = wrap.querySelector("img.ex-media[data-src]");
-  if (!img) return;
-  const src = img.getAttribute("data-src");
-  img.removeAttribute("data-src");
-  wrap._t = setTimeout(() => { if (!img.complete || !img.naturalWidth) svgFallback(wrap, ex); }, MEDIA_TIMEOUT_MS);
-  img.src = src;
-}
 
 function renderExerciseRow(dayIdx, ex) {
   const key = progKey(dayIdx, ex.id);
   const prog = state.progress[key] || { sets: [], note: "" };
 
-  const detail = el("div", { class: "ex-detail", hidden: "hidden" });
+  const detail = el("div", { class: "ex-detail" }); // פתוח כברירת מחדל
 
-  const row = el("div", { class: "ex-row" }, [
+  const row = el("div", { class: "ex-row open" }, [
     el("button", { class: "ex-main", onclick: () => toggleDetail(detail, row) }, [
       el("span", { class: "col-ex" }, [
         el("span", { class: "ex-name", text: ex.name }),
@@ -785,13 +778,8 @@ function renderExerciseRow(dayIdx, ex) {
 
 function toggleDetail(detail, row) {
   const open = detail.hasAttribute("hidden");
-  if (open) {
-    detail.removeAttribute("hidden"); row.classList.add("open");
-    const wrap = detail.querySelector(".ex-media-wrap"); // טעינה עצלה + timeout רק בפתיחה
-    if (wrap && wrap._ex) startMediaLoad(wrap, wrap._ex);
-  } else {
-    detail.setAttribute("hidden", "hidden"); row.classList.remove("open");
-  }
+  if (open) { detail.removeAttribute("hidden"); row.classList.add("open"); }
+  else { detail.setAttribute("hidden", "hidden"); row.classList.remove("open"); } // צמצום
 }
 
 /* --- סיכום נפח שבועי --- */
